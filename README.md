@@ -17,7 +17,7 @@
 
 两点说明：
 
-1. 两个包的内部类名完全一致（`tv.danmaku.biliplayerimpl.*`、`com.bilibili.pegasus.*`、`com.bilibili.ship.theseus.*`），是**同一套代码的 different flavor**，可交叉验证；关键接口在两边都能找到相同实现。
+1. 两个包的内部类名完全一致（`tv.danmaku.biliplayerimpl.*`、`com.bilibili.pegasus.*`、`com.bilibili.ship.theseus.*`），是**同一套代码的不同 flavor**，可交叉验证；关键接口在两边都能找到相同实现。
 2. 样本不是大陆手机版 `tv.danmaku.bili`。HD 版与手机版同后端、同接口族，参数一致；但版本号不同，字段可能随版本增删。**复现请用上表版本**，换版本后先按 [tools/decompile-notes.md](tools/decompile-notes.md) 重新核对字段。
 
 反编译工具：jadx 1.5.6（`--single-class` 用于规避仅大小写不同的混淆类互相覆盖）。
