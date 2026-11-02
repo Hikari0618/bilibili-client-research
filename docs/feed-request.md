@@ -59,19 +59,108 @@ public interface c {
 
 ## 3. 翻页规则
 
+两条路径共用同一个入口 `PegasusViewModel.y0`：
+
 ```java
-// PegasusViewModel.java:696-701
-PegasusHolderData last = (PegasusHolderData) list.last();
+// PegasusViewModel.java:695-701
+PegasusHolderData last = (PegasusHolderData) x.k0(getState().a.a);   // 列表最后一张
 long idx = last != null ? last.getIdx() : 0L;
-this.j = new ME0.f(idx, pull, flush, ..., );
-this.I(this, pull ? new RefreshAction(...) : new LoadMoreAction(...));
+this.j = new ME0.f(idx, pull, flush, splashId, splashIds, splashCreativeId,
+                   interestInfo, queryBannerAction, cnyInfo, windowSizeType, rawWindowSizeType);
+
+// PegasusViewModel.java:733
+I(this, pull ? new RefreshAction(fVar4, gVar) : new LoadMoreAction(fVar4, gVar));
 ```
 
-- **刷新**：`idx = 0`，`pull = true`
-- **加载更多**：`idx = 当前列表最后一张卡的 idx`，`pull = false`
-- 服务端返回的每张卡都带 `idx`，下一屏从这张卡之后接着下发
+| 场景 | `idx` | `pull` | `flush` |
+|---|---|---|---|
+| 冷启动首屏 | `0`（列表为空） | `false` | `NORMAL(0)` |
+| 下拉刷新 | **列表最后一张卡的 `idx`** | `true` | `PULL_DOWN(6)` |
+| 上滑加载更多 | **列表最后一张卡的 `idx`** | `false` | `PULL_UP(8)` |
+| 切 tab / 回前台自动刷新 | 列表最后一张卡的 `idx` | `true` | `TAB_CLICK(5)` / `AUTO_BACK_FROM_BACKGROUND(1)` 等 |
 
-所以 `idx` 是**游标**，不是页码；把页码塞进 `idx` 会导致重复/跳卡。
+**注意**：`idx` 不是页码，也不是「刷新就传 0」。只有列表为空（冷启动）时才传 0；下拉刷新同样传当前列表最后一张卡的 `idx`，服务端据此接着下发下一段，客户端拿到响应后**清空旧列表**再填入。这解释了官方客户端每次下拉都是全新一批内容、不会重复看到刚才那批卡片。
+
+## 3.1 下拉刷新：先预加载，松手再提交
+
+```java
+// PegasusViewModel.z0()（preloadPullDownRefresh，:1239-1256）
+ME0.f req = ME0.f.a(current, lastIdx, /*refresh=*/true, PegasusFlush.PULL_DOWN, splashCreativeId, null, 1624);
+this.m = req;                                  // 记住这次的参数
+this.l = launch { preloadPullDownRefresh(req) };   // 手势阶段就把请求发出去
+
+// PegasusViewModel.y0()（:706-714）
+if (pull && flush == PULL_DOWN && preloadJob != null && preloadJob.param == newParam) {
+    dispatch(new CommitPreloadedRefreshAction(newParam, parser, preloadJob));  // 直接复用预加载结果
+    return;   // 不再发第二次请求
+}
+```
+
+- 手势下拉时（还没松手）就发起请求，结果挂在 `this.l`
+- 松手后 `PegasusFragment` 调 `y0(vm, true, PULL_DOWN, ...)`（`PegasusFragment.java:597`）
+- 参数完全一致 → `CommitPreloadedRefreshAction`，**复用预加载结果，零额外请求**
+- 参数不一致（如刷新期间登录态变了）→ 取消旧 job，走正常 `RefreshAction`
+
+`RefreshAction` 的守卫与副作用（`RefreshAction.java`）：
+
+```kotlin
+if (store.getState().c()) return l("refresh isLoading")   // 正在加载直接丢弃
+dispatch(ME0.e(true))                                      // 进入 refreshing 状态
+val resp = request.a.b(param, parser)                      // GET /x/v2/feed/index
+// 响应 pull=true 且 resp.i()=true → 清空列表后插入新卡
+```
+
+## 3.2 上滑加载：距底部不足 2 个 span 触发
+
+`PegasusFragment.onViewCreated` 给 RecyclerView 挂了两个监听（`PegasusFragment.java:536-538`）：
+
+```java
+var h = new com.bilibili.pegasus.widget.h(new Df.g(this, 14));
+rv.addOnScrollListener(h);
+rv.addOnChildAttachStateChangeListener(h);
+```
+
+`com.bilibili.pegasus.widget.h`（`widget/h.java`）：
+
+```java
+public void onScrolled(RecyclerView rv, int dx, int dy) {
+    if (dy > 0) b(rv);            // 只在「向下滚」时检查
+}
+public void onChildViewAttachedToWindow(View v) { b(parentRecycler(v)); }
+
+void b(RecyclerView rv) {
+    View lastChild = rv.getChildAt(rv.getChildCount() - 1);
+    int pos = rv.getChildAdapterPosition(lastChild);
+    int budget = this.c << 1;      // c 默认 1 → 2
+    int span = 0;
+    for (int i = pos + 1; i < itemCount; i++) {
+        span += spanSizeLookup.getSpanSize(i);
+        if (span > budget) return;  // 离底部还远，不触发
+    }
+    if (rv.isComputingLayout()) post(() -> listener.invoke());
+    else listener.invoke();         // 触发加载更多
+}
+```
+
+- 阈值：最后一个可见 child 之后剩余的 span 数 ≤ 2（2 列布局下约 1 行），不是「滚到最底」
+- `onScrolled` 只在 `dy > 0` 时检查；新 child 挂载时也检查一次
+- 回调体（`Df.g` case 14）：`y0(vm, false, PULL_UP, ..., windowSizeType, rawWindowSizeType)`
+
+`LoadMoreAction` 的守卫（`LoadMoreAction.java:44-56`）：
+
+```kotlin
+if (store.getState().c()) return l("loadMore isLoading")          // 去重
+if (state.feeds.size >= vm.u.a) return l("loadMore feeds size is max")  // 列表上限
+dispatch(vm.i(0))                                                  // 尾部插入 footer_loading 卡片
+val resp = request.a.b(param, parser)
+// 响应追加到列表尾部；若返回空或 d()=true → dispatch(vm.e(...)) 显示"没有更多"
+```
+
+列表上限 `com.bilibili.pegasus.vm.u.a` 是一个懒加载配置（`BA1.c(13)`），默认值未在代码中直接可见，运行时可被下发覆盖。
+
+## 3.3 页大小
+
+请求里**没有** `ps` / `page_size` / `page` 参数，每页返回多少张卡完全由服务端决定。客户端只负责把 `idx` 游标回传。
 
 ## 4. `flush` 枚举
 
@@ -140,7 +229,13 @@ show_url, click_url, extra_rpt_fields, ...
 | 接口签名 | `evidence/classes/com__bilibili__pegasus__request__c.java` | 11–14 |
 | 实参映射 | `evidence/classes/com__bilibili__pegasus__request__a.java` | 106 |
 | 参数容器 | `evidence/classes/com__bilibili__pegasus__request__d.java` | 1–40 |
-| 翻页 idx | `evidence/classes/com__bilibili__pegasus__vm__PegasusViewModel.java` | 696–701 |
+| 翻页 idx | `evidence/classes/com__bilibili__pegasus__vm__PegasusViewModel.java` | 695–701 |
 | flush 枚举 | `evidence/classes/com__bilibili__pegasus__data__request__PegasusFlush.java` | 1–45 |
 | open_event 枚举 | `evidence/classes/com__bilibili__pegasus__data__request__OpenEvent.java` | 1–20 |
 | 卡片字段 | `evidence/classes/com__bilibili__pegasus__api__model__BasicIndexItem.java` | 1–200 |
+| 请求参数对象 | `evidence/classes/ME0__f__RequestParam.java` | 1–40 |
+| 下拉刷新预加载 | `evidence/classes/com__bilibili__pegasus__vm__PegasusViewModel.java` | 706–735, 1239–1256 |
+| 刷新 Action | `evidence/classes/com__bilibili__pegasus__vm__RefreshAction.java` | 40–230 |
+| 加载更多 Action | `evidence/classes/com__bilibili__pegasus__vm__LoadMoreAction.java` | 30–70 |
+| 上滑触发阈值 | `evidence/classes/com__bilibili__pegasus__widget__h__loadmore_trigger.java` | 1–68 |
+| 加载更多回调体 | `evidence/classes/Df_g__loadmore_lambda.java` | 1–8 |
