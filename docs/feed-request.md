@@ -158,9 +158,48 @@ val resp = request.a.b(param, parser)
 
 列表上限 `com.bilibili.pegasus.vm.u.a` 是一个懒加载配置（`BA1.c(13)`），默认值未在代码中直接可见，运行时可被下发覆盖。
 
-## 3.3 页大小
+## 3.3 「一次拉多少条」是谁决定的
 
-请求里**没有** `ps` / `page_size` / `page` 参数，每页返回多少张卡完全由服务端决定。客户端只负责把 `idx` 游标回传。
+请求里**没有** `ps` / `page_size` / `page` / `limit` 参数。官方客户端不告诉服务端"我要几条"，只回传 `idx` 游标。条数由三层控制：
+
+### 第一层：屏幕形态（唯一的间接输入）
+
+```java
+// com.bilibili.pegasus.PegasusWindowProfile
+Normal(1, 2 columns)   Medium(2, 3 columns)   Large(3, 4 columns)
+```
+
+`window_size_type` = 枚举的 `type`（1/2/3），`raw_window_size_type` 是原始窗口类型（折叠屏/分屏细分）。服务端据此决定一次下发多少张卡——大屏给得多，手机给得少。
+
+### 第二层：响应 `config` 里的渲染参数
+
+响应只有三个字段：`items` / `config` / `interest_choose`。**没有 `has_more`**，客户端用 `items.isEmpty()` 判断到底。
+
+`config`（`EE0.a`）里与数量相关的：
+
+| 字段 | 语义 | 默认 |
+|---|---|---|
+| `column` | 列数（服务端下发，覆盖本地 profile） | — |
+| `trigger_loadmore_left_line_num` | 距底部还剩几行时触发加载更多 | 客户端固定 `c=1`（2 span） |
+| `history_cache_size` | 刷新时保留的旧卡上限（用于回滚查看） | 100 |
+| `feed_top_clean` | 刷新是否清空旧列表（1=清空） | — |
+
+### 第三层：客户端本地上限
+
+```java
+// com.bilibili.pegasus.vm.u.a = kotlin.b.c(new BA1.c(13))
+// BA1.c case 13:
+String v = ConfigManager.get("pegasus.max_card_count", null);
+return v != null ? Integer.parseInt(v) : 500;
+```
+
+列表长度达到 **`pegasus.max_card_count`（默认 500）** 后，`LoadMoreAction` 直接返回 `"loadMore feeds size is max"`，不再发请求。这个值可被远程配置改。
+
+### 附：客户端会主动丢弃卡片
+
+`ActionsKt.avoidEmptyWindow` 在合并响应时，会把小卡按 `columns` 分组凑整行；如果一行凑不满（被大卡打断），**剩下的那几张直接丢弃**（`reportDiscard`）。
+
+所以「服务端下发 N 张」≠「用户看到 N 张」：客户端为了网格对齐会丢掉凑不满一行的卡。
 
 ## 4. `flush` 枚举
 
@@ -239,3 +278,7 @@ show_url, click_url, extra_rpt_fields, ...
 | 加载更多 Action | `evidence/classes/com__bilibili__pegasus__vm__LoadMoreAction.java` | 30–70 |
 | 上滑触发阈值 | `evidence/classes/com__bilibili__pegasus__widget__h__loadmore_trigger.java` | 1–68 |
 | 加载更多回调体 | `evidence/classes/Df_g__loadmore_lambda.java` | 1–8 |
+| 响应 config 字段 | `evidence/classes/EE0__a__FeedConfig.java` | 1–60 |
+| 屏幕形态枚举 | `evidence/classes/PegasusWindowProfile.java` | 1–30 |
+| 列表上限 | `evidence/classes/BA1_c__max_card_count.java` | 1–6 |
+| 凑行丢弃 | `evidence/classes/com__bilibili__pegasus__vm__ActionsKt__avoidEmptyWindow.java` | 30–100 |
