@@ -147,6 +147,7 @@ docs/
   recommendation-feedback.md    负反馈与 three_point_v2
   unknown.md                    未确认项
   seek.md                       拖动进度条的 seek 算法（全屏/非全屏）
+  badge.md                      首页消息角标的数据源与刷新机制
 evidence/
   classes/                      关键反编译类（不含用户标识）
   packets/                      抓包样本（需打码后放入）
