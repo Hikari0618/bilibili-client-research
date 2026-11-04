@@ -159,6 +159,85 @@ UI: collect(g / c) → 数字或红点
 
 ---
 
+## 3.1 数字到底怎么算：服务端算好，客户端不累加
+
+这一点容易误解。客户端**没有**把「回复 + @ + 点赞 + 通知」加起来，也没有把私信和消息中心相加。
+
+```java
+// UnreadCountDataStore.a.onNext  (UnreadCountDataStore.java:87-101)
+e.value = kVar.d;          // 服务端响应里直接给一个 a(count, displayType)
+c.value = kVar.a;          // 分类明细，只用于分栏显示，不参与总数
+```
+
+- `k.d` = 服务端算好的**总数 + 显示形式**
+- `k.a` = `SysNotificationUnreadCount` 分类计数（回复/@/点赞/通知…），只给消息中心内部用
+
+私信那一半同理：`KimMoss.getTotalUnread` 返回 `total` + `KUnreadStyle`，客户端直接用。
+
+客户端唯一做的一次「计算」是隐藏逻辑：
+
+```java
+// CommunicationUnreadCountHelper$1$2  (combine 的最后一个参数是 hidden 标志)
+if (hidden) return new a(count, UnreadCountDisplayType.None);   // 数字还在，但不显示
+return a;                                                        // 原样透传
+```
+
+## 3.2 首页那个入口的角标：G0.a()
+
+```java
+// com.bilibili.bplus.im.communication.G0.a  (G0.java:19-45)
+G0.b = 0; G0.c = false;
+
+if (im 被屏蔽 || 青少年模式 LESSONS) return 无;          // 直接不显示
+if (!用户开启消息通知)              return 无;          // isMsgNotify() == false
+
+if (displayType == Number) {
+    G0.b = count;                                       // 记住数字
+    return dh0.a.a(count, LOCAL_MESSAGE_TYPE, 2);       // 数字角标
+}
+if (displayType == RedPoint) {
+    G0.c = true;
+    return dh0.a.b();                                   // 红点
+}
+return 无;
+```
+
+所以同一个 count，可能显示成数字、红点、或完全不显示，取决于：
+
+1. 服务端下发的 `displayType`
+2. 用户是否开了消息通知
+3. 是否青少年模式 / 该入口是否被屏蔽
+
+## 3.3 点进去再退出来，发生了什么
+
+| 动作 | 发生什么 | 依据 |
+|---|---|---|
+| 进入消息页 | `onResume()` → `UnreadCountDataStore.e()` **重新拉一次**，不清零 | `HomeCommunicationFragment.java:347-370` |
+| 读了某个会话 | `conversation.markRead()`：本地会话未读清零 + 通知服务端 | 同上 `:474`、`:590` |
+| 点「一键已读」 | gRPC `UpdateUnreadScope.All` → 成功后 `UnreadCountDataStore.b()` 本地全部清零 | 同上 `:443`、`:460` |
+| 退出回首页 | 没有「退出时重算」的特殊逻辑；StateFlow 一直是最新的 | — |
+| 期间来新消息 | socket 推送 → `onNewSingleMsgUnreadEvent` → `a(false)` 重新拉取 | `CommunicationUnreadCountHelper.java:348-355` |
+
+**结论**：进入页面本身不会让角标消失。只有真正读掉（单会话或一键已读）才会清零。
+清零是**先本地、后服务端**（一键已读是先服务端成功后本地清零；单会话是本地先清）。
+
+如果看到「点进去角标没了、退出来又回来」，说明本地清了但服务端没同步成功，下次 `onResume` 拉取又把数字带回来了。
+
+## 3.4 两套实现，由开关切换
+
+```java
+// CommunicationUnreadCountHelper static {}  (CommunicationUnreadCountHelper.java:288-293)
+if (p078n70.a.a()) {                 // BffSwitch
+    log("BffSwitch is true, old badge will not work");
+    return;                          // 老实现不启动
+}
+```
+
+- 老实现：`CommunicationUnreadCountHelper` → `sendBadge()` → Handler 广播
+- 新实现：`IMBadgeUnreadDataStore` → StateFlow
+
+同一时间只有一套生效。
+
 ## 4. 和「轮询」的区别
 
 - 没有固定间隔的 Timer / delay / repeat
@@ -179,6 +258,9 @@ UI: collect(g / c) → 数字或红点
 | 消息中心拉取 | `evidence/classes/p101r70__n.java` | 5 |
 | 消息中心 store | `evidence/classes/UnreadCountDataStore.java` | 41-79 |
 | 同步到直播 | `evidence/classes/IMGetUnReadServiceImplKt.java` | 8-77 |
+| 首页入口角标 | `evidence/classes/G0.java` | 19-45 |
+| 总显示合成 / 隐藏 | `evidence/classes/CommunicationUnreadCountHelper.java` | 14-98, 288-355 |
+| 消息页进入/退出 | `HomeCommunicationFragment.java` | 347-370, 443-475, 560-600 |
 
 ## 6. 未确认
 
